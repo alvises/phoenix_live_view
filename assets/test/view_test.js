@@ -609,3 +609,52 @@ describe("DOM", function() {
     expect(target.id).toEqual("bar")
   })
 })
+
+
+function liveViewSvgWithImageDOM() {
+  const div = document.createElement("div")
+  div.setAttribute("data-phx-view", "User.Svg")
+  div.setAttribute("data-phx-session", "svg123")
+  div.setAttribute("id", "menu")
+  div.setAttribute("class", "user-implemented-class")
+  div.innerHTML = `<svg><image href="https://elixir-lang.org/images/logo/logo.png"></image></svg>`
+
+  document.body.appendChild(div)
+  return div
+}
+
+
+describe("SVG", () => {
+  
+  test("svg image is rendered correctly after join", () => {
+    let liveSocket = new LiveSocket("/live", Socket)
+    let el = liveViewSvgWithImageDOM()
+    let view = new View(el, liveSocket)
+
+    stubChannel(view)
+
+    let joinDiff = {
+      "0": {
+        "0": 0,
+        "s": [
+          "<svg>",
+          "</svg>"
+        ]
+      },
+      "c": {
+        "0": {
+          "0": "https://elixir-lang.org/images/logo/logo.png",
+          "s": [
+            "<image href=\"",
+            "\"></image>\n"
+          ]
+        }
+      },
+      "s": ["", ""]
+    };
+
+    view.onJoin({ rendered: joinDiff });
+    expect(view.el.innerHTML.trim()).toBe(`<svg><image href=\"https://elixir-lang.org/images/logo/logo.png\" data-phx-component=\"0\" id=\"container-0-0\"></image></svg>`)
+  })
+
+})
