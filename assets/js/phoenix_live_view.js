@@ -713,7 +713,6 @@ export class LiveSocket {
           offsetY: e.offsetY,
           detail: e.detail || 1,
         }
->>>>>>> upstream/master
 
         this.debounce(target, e, () => {
           this.withinOwners(target, (view, targetCtx) => {
