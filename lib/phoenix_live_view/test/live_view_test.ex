@@ -1,16 +1,16 @@
 defmodule Phoenix.LiveViewTest do
   @moduledoc """
-  Conveniences for testing Phoenix live views.
+  Conveniences for testing Phoenix LiveViews.
 
   In LiveView tests, we interact with views via process
   communication in substitution of a browser. Like a browser,
   our test process receives messages about the rendered updates
   from the view which can be asserted against to test the
-  life-cycle and behavior of live views and their children.
+  life-cycle and behavior of LiveViews and their children.
 
   ## LiveView Testing
 
-  The life-cycle of a live view as outlined in the `Phoenix.LiveView`
+  The life-cycle of a LiveView as outlined in the `Phoenix.LiveView`
   docs details how a view starts as a stateless HTML render in a disconnected
   socket state. Once the browser receives the HTML, it connects to the
   server and a new LiveView process is started, remounted in a connected
@@ -33,7 +33,7 @@ defmodule Phoenix.LiveViewTest do
       end
 
   Here, we start by using the familiar `Phoenix.ConnTest` function, `get/2` to
-  test the regular HTTP get request which invokes mount with a disconnect socket.
+  test the regular HTTP GET request which invokes mount with a disconnected socket.
   Next, `live/1` is called with our sent connection to mount the view in a connected
   state, which starts our stateful LiveView process.
 
@@ -43,30 +43,36 @@ defmodule Phoenix.LiveViewTest do
   `get` step for us:
 
       test "connected mount", %{conn: conn} do
-        {:ok, view, html} = live(conn, "/my-path")
+        {:ok, _view, html} = live(conn, "/my-path")
         assert html =~ "<h1>My Connected View</h1>"
       end
 
   ## Testing Events
 
-  The browser can send a variety of events to a live view via `phx-` bindings,
+  The browser can send a variety of events to a LiveView via `phx-` bindings,
   which are sent to the `handle_event/3` callback. To test events sent by the
-  browser and assert on the rendered side-effect of the event, use the
+  browser and assert on the rendered side effect of the event, use the
   `render_*` functions:
 
-    * `render_click/3` - sends a phx-click event and value and
+    * `render_click/1` - sends a phx-click event and value and
       returns the rendered result of the `handle_event/3` callback.
 
-    * `render_submit/3` - sends a form phx-submit event and value and
+    * `render_focus/2` - sends a phx-focus event and value and
       returns the rendered result of the `handle_event/3` callback.
 
-    * `render_change/3` - sends a form phx-change event and value and
+    * `render_blur/1` - sends a phx-blur event and value and
       returns the rendered result of the `handle_event/3` callback.
 
-    * `render_keydown/3` - sends a form phx-keydown event and value and
+    * `render_submit/1` - sends a form phx-submit event and value and
       returns the rendered result of the `handle_event/3` callback.
 
-    * `render_keyup/3` - sends a form phx-keyup event and value and
+    * `render_change/1` - sends a form phx-change event and value and
+      returns the rendered result of the `handle_event/3` callback.
+
+    * `render_keydown/1` - sends a form phx-keydown event and value and
+      returns the rendered result of the `handle_event/3` callback.
+
+    * `render_keyup/1` - sends a form phx-keyup event and value and
       returns the rendered result of the `handle_event/3` callback.
 
   For example:
@@ -87,37 +93,13 @@ defmodule Phoenix.LiveViewTest do
 
   ## Testing regular messages
 
-  Live views are `GenServer`'s under the hood, and can send and receive messages
+  LiveViews are `GenServer`'s under the hood, and can send and receive messages
   just like any other server. To test the side effects of sending or receiving
   messages, simply message the view and use the `render` function to test the
   result:
 
       send(view.pid, {:set_temp: 50})
       assert render(view) =~ "The temperature is: 50℉"
-
-  ## Testing shutdowns and stopping views
-
-  Like all processes, views can shutdown normally or abnormally, and this
-  can be tested with `assert_remove/3`. For example:
-
-      send(view.pid, :boom)
-      assert_remove view, {:shutdown, %RuntimeError{}}
-
-      stop(view)
-      assert_remove view, {:shutdown, :stop}
-
-  Nested views can be removed by a parent at any time based on conditional
-  rendering. In these cases, the removal of the view is detected by the
-  browser, or our test client, and the child is shutdown gracefully. This
-  can be tested in the same way as above:
-
-      assert render(parent) =~ "some content in child"
-
-      assert child = find_child(parent, "child-dom-id")
-      send(parent.pid, :msg_that_removes_child)
-
-      assert_remove child, _
-      refute render(parent) =~ "some content in child"
 
   ## Testing components
 
@@ -131,64 +113,73 @@ defmodule Phoenix.LiveViewTest do
   If you want to test how components are mounted by a LiveView and
   interact with DOM events, you can use the regular `live/2` macro
   to build the LiveView with the component and then scope events by
-  passing the view and the component **DOM ID** in a list:
+  passing the view and a **DOM selector** in a list:
 
       {:ok, view, html} = live(conn, "/users")
-      html = render_click([view, "user-13"], "delete", %{})
+      html = view |> element("#user-13 a", "Delete") |> render_click()
       refute html =~ "user-13"
-      assert_remove_component(view, "user-13")
+      refute view |> element("#user-13") |> has_element?()
 
+  In the example above, LiveView will lookup for an element with
+  ID=user-13 and retrieve its `phx-target`. If `phx-target` points
+  to a component, that will be the component used, otherwise it will
+  fallback to the view.
   """
 
+  @flash_cookie "__phoenix_flash__"
   require Phoenix.ConnTest
 
   alias Phoenix.LiveView.{Diff, Socket}
-  alias Phoenix.LiveViewTest.{View, ClientProxy, DOM}
+  alias Phoenix.LiveViewTest.{ClientProxy, DOM, Element, View}
+
+  @doc """
+  Puts connect params to be used on LiveView connections.
+
+  See `Phoenix.LiveView.get_connect_params/1`.
+  """
+  def put_connect_params(conn, params) when is_map(params) do
+    Plug.Conn.put_private(conn, :live_view_connect_params, params)
+  end
+
+  @doc """
+  Puts connect info to be used on LiveView connections.
+
+  See `Phoenix.LiveView.get_connect_info/1`.
+  """
+  def put_connect_info(conn, params) when is_map(params) do
+    Plug.Conn.put_private(conn, :live_view_connect_info, params)
+  end
 
   @doc """
   Spawns a connected LiveView process.
 
-  Accepts either a previously rendered `%Plug.Conn{}` or
-  an unsent `%Plug.Conn{}`. The latter case is a convenience
-  to perform the `get/2` and connected mount in a single
-  step.
-
-  ## Options
-
-    * `:connect_params` - the map of params available in the socket connected
-      mount. See `Phoenix.LiveView.get_connect_params/1` for more information.
+  If a `path` is given, then a regular `get(conn, path)`
+  is done and the page is upgraded to a `LiveView`. If
+  no path is given, it assumes a previously rendered
+  `%Plug.Conn{}` is given, which will be converted to
+  a `LiveView` immediately.
 
   ## Examples
 
       {:ok, view, html} = live(conn, "/path")
-
       assert view.module = MyLive
-
       assert html =~ "the count is 3"
 
-      assert {:error, %{redirect: %{to: "/somewhere"}}} = live(conn, "/path")
+      assert {:error, {:redirect, %{to: "/somewhere"}}} = live(conn, "/path")
 
-      {:ok, view, html} =
-        conn
-        |> get("/path")
-        |> live()
   """
-  defmacro live(conn, path_or_opts \\ []) do
-    quote bind_quoted: binding(), unquote: true, generated: true do
-      case path_or_opts do
-        opts when is_list(opts) ->
-          unquote(__MODULE__).__live__(conn, opts)
+  defmacro live(conn, path \\ nil) do
+    quote bind_quoted: binding(), generated: true do
+      cond do
+        is_binary(path) ->
+          Phoenix.LiveViewTest.__live__(get(conn, path), path)
 
-        path when is_binary(path) ->
-          unquote(__MODULE__).__live__(get(conn, path), path, [])
+        is_nil(path) ->
+          Phoenix.LiveViewTest.__live__(conn)
+
+        true ->
+          raise RuntimeError, "path must be nil or a binary, got: #{inspect(path)}"
       end
-    end
-  end
-
-  @doc "See `live/2`."
-  defmacro live(conn, path, opts) do
-    quote bind_quoted: binding(), unquote: true do
-      unquote(__MODULE__).__live__(get(conn, path), path, opts)
     end
   end
 
@@ -206,8 +197,9 @@ defmodule Phoenix.LiveViewTest do
       See `Phoenix.LiveView.get_connect_params/1` for more information.
     * `:session` - the session to be given to the LiveView
 
-  All other options are forwarded to the live view for rendering. Refer to
-  `Phoenix.LiveView.live_render/3` for list of supported render options.
+  All other options are forwarded to the LiveView for rendering. Refer to
+  `Phoenix.LiveView.Helpers.live_render/3` for a list of supported render
+  options.
 
   ## Examples
 
@@ -222,22 +214,27 @@ defmodule Phoenix.LiveViewTest do
 
   @doc false
   def __isolated__(conn, endpoint, live_view, opts) do
-    {mount_opts, lv_opts} = Keyword.split(opts, [:connect_params])
-
     put_in(conn.private[:phoenix_endpoint], endpoint || raise("no @endpoint set in test case"))
-    |> Phoenix.LiveView.Controller.live_render(live_view, lv_opts)
-    |> __live__(mount_opts)
+    |> Plug.Test.init_test_session(%{})
+    |> Phoenix.LiveView.Router.fetch_live_flash([])
+    |> Phoenix.LiveView.Controller.live_render(live_view, opts)
+    |> connect_from_static_token(nil)
   end
 
   @doc false
-  def __live__(%Plug.Conn{state: state, status: status} = conn, opts) do
+  def __live__(%Plug.Conn{state: state, status: status} = conn) do
     path = rebuild_path(conn)
+
     case {state, status} do
       {:sent, 200} ->
-        connect_from_static_token(conn, path, opts)
+        connect_from_static_token(conn, path)
 
       {:sent, 302} ->
-        {:error, %{redirect: %{to: hd(Plug.Conn.get_resp_header(conn, "location"))}}}
+        error_redirect_conn(conn)
+
+      {:sent, _} ->
+        raise ArgumentError,
+              "request to #{conn.request_path} received unexpected #{status} response"
 
       {_, _} ->
         raise ArgumentError, """
@@ -245,7 +242,7 @@ defmodule Phoenix.LiveViewTest do
 
         live/1 must use a connection with a sent response. Either call get/2
         prior to live/1, or use live/2 while providing a path to have a get
-        request issues for you. For example issuing a get yourself:
+        request issued for you. For example issuing a get yourself:
 
             {:ok, view, _html} =
               conn
@@ -259,88 +256,103 @@ defmodule Phoenix.LiveViewTest do
     end
   end
 
-  def __live__(conn, path, opts) do
-    connect_from_static_token(conn, path, opts)
+  @doc false
+  def __live__(conn, path) do
+    connect_from_static_token(conn, path)
   end
 
-  defp connect_from_static_token(%Plug.Conn{status: redir} = conn, _path, _opts)
+  defp connect_from_static_token(%Plug.Conn{status: redir} = conn, _path)
        when redir in [301, 302] do
-    {:error, %{redirect: %{to: hd(Plug.Conn.get_resp_header(conn, "location"))}}}
+    error_redirect_conn(conn)
   end
 
-  defp connect_from_static_token(%Plug.Conn{status: 200} = conn, path, opts) do
+  defp connect_from_static_token(%Plug.Conn{status: 200} = conn, path) do
+    DOM.ensure_loaded!()
+
     html =
       conn
       |> Phoenix.ConnTest.html_response(200)
       |> IO.iodata_to_binary()
+      |> DOM.parse()
 
-    unless Code.ensure_loaded?(Floki) do
-      raise """
-      Phoenix LiveView requires Floki as a test dependency.
-      Please add to your mix.exs:
+    case DOM.find_live_views(html) do
+      [{id, session_token, static_token} | _] ->
+        do_connect(conn, path, html, session_token, static_token, id)
 
-      {:floki, ">= 0.0.0", only: :test}
-      """
-    end
-
-    case DOM.find_views(html) do
-      [{id, session_token, nil} | _] -> do_connect(conn, path, html, session_token, id, opts)
-      [] -> {:error, :nosession}
+      [] ->
+        {:error, :nosession}
     end
   end
 
-  defp do_connect(%Plug.Conn{} = conn, path, raw_html, session_token, id, opts) do
-    child_statics = DOM.find_static_views(raw_html)
-    timeout = opts[:timeout] || 5000
-    html = DOM.to_html(DOM.parse(raw_html))
+  defp error_redirect_conn(conn) do
+    to = hd(Plug.Conn.get_resp_header(conn, "location"))
+
+    opts =
+      if flash = conn.private[:phoenix_flash] do
+        endpoint = Phoenix.Controller.endpoint_module(conn)
+        %{to: to, flash: Phoenix.LiveView.Utils.sign_flash(endpoint, flash)}
+      else
+        %{to: to}
+      end
+
+    {:error, {error_redirect_key(conn), opts}}
+  end
+
+  defp error_redirect_key(%{private: %{phoenix_live_redirect: true}}), do: :live_redirect
+  defp error_redirect_key(_), do: :redirect
+
+  defp do_connect(%Plug.Conn{} = conn, path, html, session_token, static_token, id) do
+    child_statics = Map.delete(DOM.find_static_views(html), id)
+    endpoint = Phoenix.Controller.endpoint_module(conn)
 
     %ClientProxy{ref: ref} =
-      view =
+      proxy =
       ClientProxy.build(
         id: id,
-        mount_path: path,
-        connect_params: opts[:connect_params] || %{},
+        connect_params: conn.private[:live_view_connect_params] || %{},
+        connect_info: conn.private[:live_view_connect_info] || %{},
         session_token: session_token,
-        module: conn.assigns.live_view_module,
-        endpoint: Phoenix.Controller.endpoint_module(conn),
+        static_token: static_token,
+        module: conn.assigns.live_module,
+        endpoint: endpoint,
         child_statics: child_statics
       )
 
     opts = [
       caller: {self(), ref},
       html: html,
-      view: view,
-      timeout: timeout,
-      session: Plug.Conn.get_session(conn)
+      proxy: proxy,
+      session: maybe_get_session(conn),
+      url: mount_url(endpoint, path)
     ]
 
     case ClientProxy.start_link(opts) do
-      {:ok, proxy_pid} ->
+      {:ok, _} ->
         receive do
-          {^ref, {:mounted, view_pid, html}} ->
-            receive do
-              {^ref, {:redirect, _topic, opts}} ->
-                %{to: to} = opts
-                ensure_down!(view_pid)
-                {:error, %{redirect: to}}
-            after
-              0 ->
-                {:ok, build_test_view(view, view_pid, proxy_pid), html}
-            end
+          {^ref, {:ok, view, html}} -> {:ok, view, html}
         end
+
+      {:error, reason} ->
+        exit({reason, {__MODULE__, :live, [path]}})
 
       :ignore ->
         receive do
-          {^ref, {%_{} = exception, [_ | _] = stack}} -> reraise(exception, stack)
-          {^ref, %{external_live_redirect: opts}} -> {:error, %{redirect: opts}}
-          {^ref, reason} -> {:error, reason}
+          {^ref, {:error, reason}} -> {:error, reason}
         end
     end
   end
 
-  defp build_test_view(%ClientProxy{id: id, ref: ref} = view, view_pid, proxy_pid) do
-    %View{id: id, pid: view_pid, proxy: {ref, view.topic, proxy_pid}, module: view.module}
+  defp maybe_get_session(%Plug.Conn{} = conn) do
+    try do
+      Plug.Conn.get_session(conn)
+    rescue
+      _ -> %{}
+    end
   end
+
+  defp mount_url(_endpoint, nil), do: nil
+  defp mount_url(endpoint, "/"), do: endpoint.url()
+  defp mount_url(endpoint, path), do: Path.join(endpoint.url(), path)
 
   defp rebuild_path(%Plug.Conn{request_path: request_path, query_string: ""}),
     do: request_path
@@ -351,35 +363,123 @@ defmodule Phoenix.LiveViewTest do
   @doc """
   Mounts, updates and renders a component.
 
+  If the component uses the `@myself` assigns, then an `id` must
+  be given to it is marked as stateful.
+
   ## Examples
 
       assert render_component(MyComponent, id: 123, user: %User{}) =~
                "some markup in component"
 
   """
-  def render_component(component, assigns) do
-    %Socket{}
-    |> Diff.component_to_rendered(component, assigns)
-    |> Phoenix.HTML.Safe.to_iodata()
-    |> IO.iodata_to_binary()
+  defmacro render_component(component, assigns) do
+    endpoint =
+      Module.get_attribute(__CALLER__.module, :endpoint) ||
+        raise ArgumentError,
+              "the module attribute @endpoint is not set for #{inspect(__MODULE__)}"
+
+    quote do
+      Phoenix.LiveViewTest.__render_component__(
+        unquote(endpoint),
+        unquote(component),
+        unquote(assigns)
+      )
+    end
+  end
+
+  @doc false
+  def __render_component__(endpoint, component, assigns) do
+    socket = %Socket{endpoint: endpoint}
+    assigns = Map.new(assigns)
+    mount_assigns = if assigns[:id], do: %{myself: -1}, else: %{}
+    rendered = Diff.component_to_rendered(socket, component, assigns, mount_assigns)
+    {_, diff, _} = Diff.render(socket, rendered, Diff.new_components())
+    diff |> Diff.to_iodata() |> IO.iodata_to_binary()
   end
 
   @doc """
-  Sends a click event to the view and returns the rendered result.
+  Sends a click event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-click` attribute in it. The event name
+  given set on `phx-click` is then sent to the appropriate LiveView
+  (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values. Extra values can be given
+  with the `value` argument.
+
+  If the element is does not have a `phx-click` attribute but it is
+  a link (the `<a>` tag), the link will be followed accordingly:
+
+    * if the link is a `live_patch`, the current view will be patched
+    * if the link is a `live_redirect`, this function will return
+      `{:error, {:live_redirect, %{to: url}}}`, which can be followed
+      with `follow_redirect/2`
+    * if the link is a regular link, this function will return
+      `{:error, {:redirect, %{to: url}}}`, which can be followed
+      with `follow_redirect/2`
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("buttons", "Increment")
+             |> render_click() =~ "The temperature is: 30℉"
+  """
+  def render_click(element, value \\ %{})
+  def render_click(%Element{} = element, value), do: render_event(element, :click, value)
+  def render_click(view, event), do: render_click(view, event, %{})
+
+  @doc """
+  Sends a click `event` to the `view` with `value` and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
 
   ## Examples
 
       {:ok, view, html} = live(conn, "/thermo")
       assert html =~ "The temperature is: 30℉"
       assert render_click(view, :inc) =~ "The temperature is: 31℉"
-      assert render_click([view, "clock"], :set, %{time: "1:00"}) =~ "time: 1:00 PM"
+
   """
-  def render_click(view, event, value \\ %{}) do
+  def render_click(view, event, value) do
     render_event(view, :click, event, value)
   end
 
   @doc """
+  Sends a form submit event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-submit` attribute in it. The event name
+  given set on `phx-submit` is then sent to the appropriate LiveView
+  (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values. Extra values can be given
+  with the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("form")
+             |> render_submit(%{deg: 123}) =~ "123 exceeds limits"
+  """
+  def render_submit(element, value \\ %{})
+  def render_submit(%Element{} = element, value), do: render_event(element, :submit, value)
+  def render_submit(view, event), do: render_submit(view, event, %{})
+
+  @doc """
   Sends a form submit event to the view and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
 
   ## Examples
 
@@ -387,13 +487,49 @@ defmodule Phoenix.LiveViewTest do
       assert html =~ "The temp is: 30℉"
       assert render_submit(view, :refresh, %{deg: 32}) =~ "The temp is: 32℉"
   """
-  def render_submit(view, event, value \\ %{}) do
-    encoded_form = Plug.Conn.Query.encode(value)
-    render_event(view, :form, event, encoded_form)
+  def render_submit(view, event, value) do
+    render_event(view, :form, event, value)
   end
 
   @doc """
+  Sends a form change event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-change` attribute in it. The event name
+  given set on `phx-change` is then sent to the appropriate LiveView
+  (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values.
+
+  If you need to pass any extra values or metadata, such as the "_target"
+  parameter, you can do so by giving a map under the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("form")
+             |> render_change(%{deg: 123}) =~ "123 exceeds limits"
+
+      # Passing metadata
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("form")
+             |> render_change(%{_target: ["deg"], deg: 123}) =~ "123 exceeds limits"
+  """
+  def render_change(element, value \\ %{})
+  def render_change(%Element{} = element, value), do: render_event(element, :change, value)
+  def render_change(view, event), do: render_change(view, event, %{})
+
+  @doc """
   Sends a form change event to the view and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
 
   ## Examples
 
@@ -401,230 +537,531 @@ defmodule Phoenix.LiveViewTest do
       assert html =~ "The temp is: 30℉"
       assert render_change(view, :validate, %{deg: 123}) =~ "123 exceeds limits"
   """
-  def render_change(view, event, value \\ %{}) do
-    encoded_form = Plug.Conn.Query.encode(value)
-    render_event(view, :form, event, encoded_form)
+  def render_change(view, event, value) do
+    render_event(view, :form, event, value)
   end
 
   @doc """
-  Sends a keyup event to the view and returns the rendered result.
+  Sends a keydown event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single element
+  on the page with a `phx-keydown` or `phx-window-keydown` attribute in it.
+  The event name given set on `phx-keydown` is then sent to the appropriate
+  LiveView (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values. Extra values can be given with
+  the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
 
   ## Examples
 
       {:ok, view, html} = live(conn, "/thermo")
       assert html =~ "The temp is: 30℉"
-      assert render_keyup(view, :inc, :ArrowUp) =~ "The temp is: 32℉"
-      assert render_keyup([view, "child-id"], :inc, :ArrowDown) =~ "The temp is: 31℉"
+      assert view |> element("#inc") |> render_keydown() =~ "The temp is: 31℉"
+
   """
-  def render_keyup(view, event, key_code) do
-    render_event(view, :keyup, event, key_code)
-  end
+  def render_keydown(element, value \\ %{})
+
+  def render_keydown(%Element{} = element, value),
+    do: render_event(element, :keydown, value)
+
+  def render_keydown(view, event), do: render_keydown(view, event, %{})
 
   @doc """
   Sends a keydown event to the view and returns the rendered result.
 
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
   ## Examples
 
       {:ok, view, html} = live(conn, "/thermo")
       assert html =~ "The temp is: 30℉"
-      assert render_keyup(view, :inc, :ArrowUp) =~ "The temp is: 32℉"
-      assert render_keyup([view, "child-id"], :inc, :ArrowDown) =~ "The temp is: 31℉"
+      assert render_keydown(view, :inc) =~ "The temp is: 31℉"
+
   """
-  def render_keydown(view, event, key_code) do
-    render_event(view, :keydown, event, key_code)
+  def render_keydown(view, event, value) do
+    render_event(view, :keydown, event, value)
   end
+
+  @doc """
+  Sends a keyup event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-keyup` or `phx-window-keyup` attribute
+  in it. The event name given set on `phx-keyup` is then sent to the
+  appropriate LiveView (or component if `phx-target` is set accordingly).
+  All `phx-value-*` entries in the element are sent as values. Extra values
+  can be given with the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+      assert html =~ "The temp is: 30℉"
+      assert view |> element("#inc") |> render_keyup() =~ "The temp is: 31℉"
+
+  """
+  def render_keyup(element, value \\ %{})
+  def render_keyup(%Element{} = element, value), do: render_event(element, :keyup, value)
+  def render_keyup(view, event), do: render_keyup(view, event, %{})
+
+  @doc """
+  Sends a keyup event to the view and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+      assert html =~ "The temp is: 30℉"
+      assert render_keyup(view, :inc) =~ "The temp is: 31℉"
+
+  """
+  def render_keyup(view, event, value) do
+    render_event(view, :keyup, event, value)
+  end
+
+  @doc """
+  Sends a blur event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-blur` attribute in it. The event name
+  given set on `phx-blur` is then sent to the appropriate LiveView
+  (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values. Extra values can be given
+  with the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("#inactive")
+             |> render_blur() =~ "Tap to wake"
+  """
+  def render_blur(element, value \\ %{})
+  def render_blur(%Element{} = element, value), do: render_event(element, :blur, value)
+  def render_blur(view, event), do: render_blur(view, event, %{})
 
   @doc """
   Sends a blur event to the view and returns the rendered result.
 
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
   ## Examples
 
       {:ok, view, html} = live(conn, "/thermo")
       assert html =~ "The temp is: 30℉"
       assert render_blur(view, :inactive) =~ "Tap to wake"
-      assert render_blur([view, "child-id"], :inactive) =~ "Tap to wake"
+
   """
-  def render_blur(view, event, value \\ %{}) do
+  def render_blur(view, event, value) do
     render_event(view, :blur, event, value)
   end
 
   @doc """
+  Sends a focus event given by `element` and returns the rendered result.
+
+  The `element` is created with `element/3` and must point to a single
+  element on the page with a `phx-focus` attribute in it. The event name
+  given set on `phx-focus` is then sent to the appropriate LiveView
+  (or component if `phx-target` is set accordingly). All `phx-value-*`
+  entries in the element are sent as values. Extra values can be given
+  with the `value` argument.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+
+      assert view
+             |> element("#inactive")
+             |> render_focus() =~ "Tap to wake"
+  """
+  def render_focus(element, value \\ %{})
+  def render_focus(%Element{} = element, value), do: render_event(element, :focus, value)
+  def render_focus(view, event), do: render_focus(view, event, %{})
+
+  @doc """
   Sends a focus event to the view and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
 
   ## Examples
 
       {:ok, view, html} = live(conn, "/thermo")
       assert html =~ "The temp is: 30℉"
-      assert render_blur(view, :inactive) =~ "Tap to wake"
-      assert render_focus(view, :active) =~ "Waking up..."
-      assert render_focus([view, "child-id"], :active) =~ "Waking up..."
+      assert render_focus(view, :inactive) =~ "Tap to wake"
+
   """
-  def render_focus(view, event, value \\ %{}) do
+  def render_focus(view, event, value) do
     render_event(view, :focus, event, value)
   end
 
-  defp render_event([%View{} = view | path], type, event, value) do
-    case GenServer.call(
-           proxy_pid(view),
-           {:render_event, proxy_topic(view), type, path, event, stringify(value)}
-         ) do
-      {:ok, html} -> html
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp render_event(%View{} = view, type, event, value) do
-    render_event([view], type, event, value)
-  end
-
   @doc """
-  Simulates a live_link click to the view and returns the rendered result.
+  Sends a hook event to the view and returns the rendered result.
+
+  It returns the contents of the whole LiveView or an `{:error, redirect}`
+  tuple.
+
+  ## Examples
+
+      {:ok, view, html} = live(conn, "/thermo")
+      assert html =~ "The temp is: 30℉"
+      assert render_hook(view, :refresh, %{deg: 32}) =~ "The temp is: 32℉"
   """
-  def render_live_link(view, path) do
-    case GenServer.call(proxy_pid(view), {:render_live_link, proxy_topic(view), path}) do
-      {:ok, html} -> html
-      {:error, reason} -> {:error, reason}
-    end
+  def render_hook(view_or_element, event, value \\ %{})
+
+  def render_hook(%Element{} = element, event, value) do
+    render_event(%{element | event: to_string(event)}, :hook, value)
+  end
+
+  def render_hook(view, event, value) do
+    render_event(view, :hook, event, value)
+  end
+
+  defp render_event(%Element{} = element, type, value) when is_map(value) or is_list(value) do
+    call(element, {:render_event, element, type, value})
+  end
+
+  defp render_event(%View{} = view, type, event, value) when is_map(value) or is_list(value) do
+    call(view, {:render_event, {proxy_topic(view), to_string(event)}, type, value})
+  end
+
+  # TODO: Deprecate me
+  defp render_event([%View{} = view | path], type, event, value)
+       when is_map(value) or is_list(value) do
+    IO.warn(
+      "passing a view plus the path #{inspect(path)} is deprecated on tests. " <>
+        "See the new element/form API instead"
+    )
+
+    element = %{element(view, Enum.join(path, " ")) | event: to_string(event)}
+    call(view, {:render_event, element, type, value})
   end
 
   @doc """
-  Returns the current list of children of the parent live view.
+  Simulates a `live_patch` to the given `path` and returns the rendered result.
+  """
+  def render_patch(%View{} = view, path) when is_binary(path) do
+    call(view, {:render_patch, proxy_topic(view), path})
+  end
 
-  Children are return in the order they appear in the rendered HTML.
+  @doc """
+  Returns the current list of LiveView children for the `parent` LiveView.
+
+  Children are returned in the order they appear in the rendered HTML.
 
   ## Examples
 
       {:ok, view, _html} = live(conn, "/thermo")
-      assert [clock_view] = children(view)
+      assert [clock_view] = live_children(view)
       assert render_click(clock_view, :snooze) =~ "snoozing"
   """
-  def children(%View{} = parent) do
-    parent
-    |> proxy_pid()
-    |> GenServer.call({:children, proxy_topic(parent)})
-    |> Enum.map(fn %ClientProxy{} = proxy_view ->
-      build_test_view(proxy_view, proxy_view.pid, proxy_view.proxy)
-    end)
+  def live_children(%View{} = parent) do
+    call(parent, {:live_children, proxy_topic(parent)})
   end
 
   @doc """
-  Finds the nested LiveView child given a parent.
+  Gets the nested LiveView child by `child_id` from the `parent` LiveView.
 
   ## Examples
 
       {:ok, view, _html} = live(conn, "/thermo")
-      assert clock_view = find_child(view, "clock")
+      assert clock_view = find_live_child(view, "#clock")
       assert render_click(clock_view, :snooze) =~ "snoozing"
   """
-  def find_child(%View{} = parent, child_id) do
+  def find_live_child(%View{} = parent, child_id) do
     parent
-    |> children()
+    |> live_children()
     |> Enum.find(fn %View{id: id} -> id == child_id end)
   end
 
   @doc """
-  Returns the string of HTML of the rendered view or component.
+  Checks if the given element exists on the page.
 
-  If a view is provided, the entire LiveView is rendered. A list
-  may be passed containing view and the component **DOM ID's**:
+  ## Examples
+
+      assert view |> element("#some-element") |> has_element?()
+
+  """
+  def has_element?(%Element{} = element) do
+    call(element, {:render, :has_element?, element})
+  end
+
+  @doc """
+  Checks if the given `selector` with `text_filter` is on `view`.
+
+  See `element/3` for more information.
+
+  ## Examples
+
+      assert has_element?(view, "#some-element")
+
+  """
+  def has_element?(%View{} = view, selector, text_filter \\ nil) do
+    has_element?(element(view, selector, text_filter))
+  end
+
+  @doc """
+  Returns the HTML string of the rendered view or element.
+
+  If a view is provided, the entire LiveView is rendered. If an
+  element is provided, only that element is rendered.
 
   ## Examples
 
       {:ok, view, _html} = live(conn, "/thermo")
-      assert render(view) =~ "cooling"
-      assert render([view, "clock"]) =~ "12:00 PM"
-      assert render([view, "clock", "alarm"]) =~ "Snooze"
+      assert render(view) =~ ~s|<button id="alarm">Snooze</div>|
+
+      assert view
+             |> element("#alarm")
+             |> render() == "Snooze"
   """
-  def render(%View{} = view), do: render([view])
+  def render(%View{} = view) do
+    render(view, proxy_topic(view))
+  end
+
+  def render(%Element{} = element) do
+    render(element, element)
+  end
 
   def render([%View{} = view | path]) do
-    {:ok, html} = GenServer.call(proxy_pid(view), {:render_tree, proxy_topic(view), path})
-    html
+    IO.warn("invoking render/1 with a path is deprecated, pass a live_view or an element instead")
+    render(view, element(view, Path.join(path, " ")))
   end
 
-  def render(other) do
-    raise ArgumentError,
-          "expected to render a %View{} or view ID selector. Got: #{inspect(other)}"
+  defp render(view_or_element, topic_or_element) do
+    call(view_or_element, {:render, :find_element, topic_or_element}) |> DOM.to_html()
   end
 
-  @doc """
-  Asserts a redirect was peformed after execution of the provided
-  function.
+  defp call(view_or_element, tuple) do
+    try do
+      GenServer.call(proxy_pid(view_or_element), tuple, 30_000)
+    catch
+      :exit, {{:shutdown, {kind, opts}}, _} when kind in [:redirect, :live_redirect] ->
+        {:error, {kind, opts}}
 
-  ## Examples
-
-      assert_redirect view, "/path", fn ->
-        assert render_click(view, :event_that_triggers_redirect)
-      end
-  """
-  defmacro assert_redirect(view, to, func) do
-    quote do
-      %View{proxy: {ref, topic, _proxy_pid}} = unquote(view)
-      unquote(func).()
-      assert_receive {^ref, {:redirect, ^topic, %{to: unquote(to)}}}
+      :exit, {{exception, stack}, _} ->
+        exit({{exception, stack}, {__MODULE__, :call, [view_or_element]}})
+    else
+      :ok -> :ok
+      {:ok, result} -> result
+      {:raise, exception} -> raise exception
     end
   end
 
   @doc """
-  Asserts a view was removed by a parent or shutdown itself.
+  Returns an element to scope a function to.
+
+  It expects the current LiveView, a query selector, and a text filter.
+
+  An optional text filter may be given to filter the results by the query
+  selector. If the text filter is a string or a regex, it will match any
+  element that contains the string or matches the regex. After the text
+  filter is applied, only one element must remain, otherwise an error is
+  raised.
+
+  If no text filter is given, then the query selector itself must return
+  a single element.
+
+      assert view
+            |> element("#term a:first-child()", "Increment")
+            |> render() =~ "Increment</a>"
+
+  """
+  def element(%View{proxy: proxy}, selector, text_filter \\ nil) when is_binary(selector) do
+    %Element{proxy: proxy, selector: selector, text_filter: text_filter}
+  end
+
+  @doc """
+  Returns a form element to scope a function to.
+
+  It expects the current LiveView, a query selector, and the form data.
+  The query selector must return a single element.
+
+  The form data will be validated directly against the form markup and
+  make sure the data you are changing/submitting actually exists, failing
+  otherwise.
+
+      assert view
+            |> form("#term", user: %{name: "hello"})
+            |> render_submit() =~ "Name updated"
+
+  """
+  def form(%View{proxy: proxy}, selector, form_data \\ %{}) when is_binary(selector) do
+    %Element{proxy: proxy, selector: selector, form_data: form_data}
+  end
+
+  @doc """
+  Asserts a live patch will happen within `timeout`.
+
+  It always returns `:ok`. To assert on the flash message,
+  you can assert on the result of the rendered LiveView.
 
   ## Examples
 
-      [child1, child2] = children(parent_view)
-      send(parent_view.pid, :msg_that_removes_child)
+      render_click(view, :event_that_triggers_patch)
+      assert_patch view, "/path"
 
-      assert_remove child1, _
-      assert_remove child2, {:shutdown, :removed}
   """
-  defmacro assert_remove(view, reason, timeout \\ 100) do
-    quote do
-      %View{proxy: {ref, topic, _proxy_pid}} = unquote(view)
-      assert_receive {^ref, {:removed, ^topic, unquote(reason)}}, unquote(timeout)
+  def assert_patch(%View{} = view, to, timeout \\ 100)
+      when is_binary(to) and is_integer(timeout) do
+    assert_navigation(view, :patch, to, timeout)
+    :ok
+  end
+
+  @doc """
+  Asserts a live patch was performed.
+
+  It always returns `:ok`. To assert on the flash message,
+  you can assert on the result of the rendered LiveView.
+
+  ## Examples
+
+      render_click(view, :event_that_triggers_redirect)
+      assert_patched view, "/path"
+
+  """
+  def assert_patched(view, to) do
+    assert_patch(view, to, 0)
+  end
+
+  @doc """
+  Asserts a redirect will happen within `timeout`.
+
+  It returns the flash messages from said redirect, if any.
+  Note the flash will contain string keys.
+
+  ## Examples
+
+      render_click(view, :event_that_triggers_redirect)
+      flash = assert_redirect view, "/path"
+      assert flash["info"] == "Welcome"
+
+  """
+  def assert_redirect(%View{} = view, to, timeout \\ 100)
+      when is_binary(to) and is_integer(timeout) do
+    assert_navigation(view, :redirect, to, timeout)
+  end
+
+  @doc """
+  Asserts a redirect was performed.
+
+  It returns the flash messages from said redirect, if any.
+  Note the flash will contain string keys.
+
+  ## Examples
+
+      render_click(view, :event_that_triggers_redirect)
+      flash = assert_redirected view, "/path"
+      assert flash["info"] == "Welcome"
+
+  """
+  def assert_redirected(view, to) do
+    assert_redirect(view, to, 0)
+  end
+
+  defp assert_navigation(view, kind, to, timeout) do
+    %{proxy: {ref, topic, _}, endpoint: endpoint} = view
+
+    receive do
+      {^ref, {^kind, ^topic, %{to: ^to} = opts}} ->
+        Phoenix.LiveView.Utils.verify_flash(endpoint, opts[:flash])
+    after
+      timeout ->
+        message = "expected #{inspect(view.module)} to #{kind} to #{inspect(to)}, "
+
+        case flush_navigation(ref, topic, nil) do
+          nil -> raise ArgumentError, message <> "but got none"
+          {kind, to} -> raise ArgumentError, message <> "but got a #{kind} to #{inspect(to)}"
+        end
+    end
+  end
+
+  defp flush_navigation(ref, topic, last) do
+    receive do
+      {^ref, {kind, ^topic, %{to: to}}} when kind in [:patch, :redirect] ->
+        flush_navigation(ref, topic, {kind, to})
+    after
+      0 -> last
+    end
+  end
+
+  @doc """
+  Follows the redirect from a `render_*` action.
+
+  Imagine you have a LiveView that redirects on a `render_click`
+  event. You can make it sure it immediately redirects after the
+  `render_click` action by calling `follow_redirect/3`:
+
+      live_view
+      |> render_click("redirect")
+      |> follow_redirect(conn)
+
+  `follow_redirect/3` expects a connection as second argument.
+  This is the connection that will be used to perform the underlying
+  request.
+
+  If the LiveView redirects with a live redirect, this macro returns
+  `{:ok, live_view, disconnected_html}` with the content of the new
+  LiveView, the same as the `live/3` macro. If the LiveView redirects
+  with a regular redirect, this macro returns `{:ok, conn}` with the
+  rendered redirected page. In any other case, this macro raises.
+
+  Finally, note that you can optionally assert on the path you are
+  being redirected to by passing a third argument:
+
+      live_view
+      |> render_click("redirect")
+      |> follow_redirect(conn, "/redirected/page")
+
+  """
+  defmacro follow_redirect(reason, conn, to \\ nil) do
+    quote bind_quoted: binding() do
+      case reason do
+        {:error, {:live_redirect, opts}} ->
+          {conn, to} = Phoenix.LiveViewTest.__follow_redirect__(conn, to, opts)
+          live(conn, to)
+
+        {:error, {:redirect, opts}} ->
+          {conn, to} = Phoenix.LiveViewTest.__follow_redirect__(conn, to, opts)
+          {:ok, get(conn, to)}
+
+        _ ->
+          raise "LiveView did not redirect"
+      end
     end
   end
 
   @doc false
-  defmacro assert_remove_component(view, id, timeout \\ 100) do
-    quote bind_quoted: binding() do
-      %View{proxy: {ref, topic, _proxy_pid}} = view
-      assert_receive {^ref, {:removed_component, ^topic, ^id}}, timeout
+  def __follow_redirect__(conn, expected_to, %{to: to} = opts) do
+    if expected_to && expected_to != to do
+      raise ArgumentError,
+            "expected LiveView to redirect to #{inspect(expected_to)}, but got #{inspect(to)}"
+    end
+
+    conn = Phoenix.ConnTest.ensure_recycled(conn)
+
+    if flash = opts[:flash] do
+      {Phoenix.ConnTest.put_req_cookie(conn, @flash_cookie, flash), to}
+    else
+      {conn, to}
     end
   end
 
-  @doc """
-  Stops a LiveView process.
-
-  ## Examples
-
-      stop(view)
-      assert_remove view, {:shutdown, :stop}
-  """
-  def stop(%View{} = view) do
-    GenServer.call(proxy_pid(view), {:stop, proxy_topic(view)})
-  end
-
-  defp ensure_down!(pid, timeout \\ 100) do
-    ref = Process.monitor(pid)
-
-    receive do
-      {:DOWN, ^ref, :process, ^pid, reason} -> {:ok, reason}
-    after
-      timeout -> {:error, :timeout}
-    end
-  end
-
-  defp stringify(%{__struct__: _} = struct),
-    do: struct
-
-  defp stringify(%{} = params),
-    do: Enum.into(params, %{}, &stringify_kv/1)
-
-  defp stringify(other),
-    do: other
-
-  defp stringify_kv({k, v}),
-    do: {to_string(k), stringify(v)}
-
-  defp proxy_pid(%View{proxy: {_ref, _topic, pid}}), do: pid
-  defp proxy_topic(%View{proxy: {_ref, topic, _pid}}), do: topic
+  defp proxy_pid(%{proxy: {_ref, _topic, pid}}), do: pid
+  defp proxy_topic(%{proxy: {_ref, topic, _pid}}), do: topic
 end

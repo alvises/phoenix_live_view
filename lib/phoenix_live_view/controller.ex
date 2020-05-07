@@ -9,12 +9,12 @@ defmodule Phoenix.LiveView.Controller do
   @doc """
   Renders a live view from a Plug request and sends an HTML response.
 
-  Before render the `@live_view_module` assign will be added to the
+  Before render the `@live_module` assign will be added to the
   connection assigns for reference.
 
   ## Options
 
-  See `Phoenix.LiveView.live_render/3` for all supported options.
+  See `Phoenix.LiveView.Helpers.live_render/3` for all supported options.
 
   ## Examples
 
@@ -33,20 +33,25 @@ defmodule Phoenix.LiveView.Controller do
   """
   def live_render(%Plug.Conn{} = conn, view, opts \\ []) do
     case LiveView.Static.render(conn, view, opts) do
-      {:ok, content} ->
+      {:ok, content, socket_assigns} ->
         conn
-        |> Plug.Conn.assign(:live_view_module, view)
         |> Phoenix.Controller.put_view(LiveView.Static)
         |> LiveView.Plug.put_cache_headers()
-        |> Phoenix.Controller.render("template.html", %{content: content})
+        |> Phoenix.Controller.render(
+          "template.html",
+          Map.put(socket_assigns, :content, content)
+        )
 
-      {:stop, %Socket{redirected: {:redirect, opts}} = socket} ->
+      {:stop, %Socket{redirected: {:redirect, %{to: to}}} = socket} ->
         conn
         |> put_flash(LiveView.Utils.get_flash(socket))
-        |> Phoenix.Controller.redirect(to: Map.fetch!(opts, :to))
+        |> Phoenix.Controller.redirect(to: to)
 
-      {:stop, %Socket{redirected: {:live, opts}}} ->
-        Phoenix.Controller.redirect(conn, to: Map.fetch!(opts, :to))
+      {:stop, %Socket{redirected: {:live, _, %{to: to}}} = socket} ->
+        conn
+        |> put_flash(LiveView.Utils.get_flash(socket))
+        |> Plug.Conn.put_private(:phoenix_live_redirect, true)
+        |> Phoenix.Controller.redirect(to: to)
     end
   end
 

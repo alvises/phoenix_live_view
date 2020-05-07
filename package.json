@@ -1,6 +1,6 @@
 {
   "name": "phoenix_live_view",
-  "version": "0.4.1",
+  "version": "0.12.1",
   "description": "The Phoenix LiveView JavaScript client.",
   "license": "MIT",
   "main": "./priv/static/phoenix_live_view.js",
@@ -14,7 +14,6 @@
     "LICENSE.md",
     "package.json",
     "priv/static/phoenix_live_view.js",
-    "assets/js/phoenix_live_view.js",
-    "assets/css/live_view.css"
+    "assets/js/phoenix_live_view.js"
   ]
 }

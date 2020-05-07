@@ -1,22 +1,24 @@
 defmodule Phoenix.LiveComponent do
-  @moduledoc ~S"""
+  @moduledoc """
   Components are a mechanism to compartmentalize state, markup, and
   events in LiveView.
 
   Components are defined by using `Phoenix.LiveComponent` and are used
-  by calling `Phoenix.LiveView.live_component/3` in a parent LiveView.
+  by calling `Phoenix.LiveView.Helpers.live_component/3` in a parent LiveView.
   Components run inside the LiveView process, but may have their own
   state and event handling.
 
   The simplest component only needs to define a `render` function:
 
       defmodule HeroComponent do
+        # If you generated an app with mix phx.new --live,
+        # the line below would be: use MyAppWeb, :live_component
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~L"\""
+          ~L\"""
           <div class="hero"><%= @content %></div>
-          "\""
+          \"""
         end
       end
 
@@ -39,7 +41,7 @@ defmodule Phoenix.LiveComponent do
 
   First `c:mount/1` is called only with the socket. `mount/1` can be used
   to set any initial state. Then `c:update/2` is invoked with all of the
-  assigns given to `live_component/2`. The default implementation of
+  assigns given to `live_component/3`. The default implementation of
   `c:update/2` simply merges all assigns into the socket. Then, after the
   component is updated, `c:render/1` is called with all assigns.
 
@@ -51,7 +53,7 @@ defmodule Phoenix.LiveComponent do
 
   ## Stateful components life-cycle
 
-  A stateful component is a component that receives an `:id` on `live_component/2`:
+  A stateful component is a component that receives an `:id` on `live_component/3`:
 
       <%= live_component @socket, HeroComponent, id: :hero, content: @content %>
 
@@ -65,13 +67,13 @@ defmodule Phoenix.LiveComponent do
   Also note the given `:id` is not necessarily used as the DOM ID. If you
   want to set a DOM ID, it is your responsibility to set it when rendering:
 
-      defmodule HeroComponent do
+      defmodule UserComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~L"\""
-          <div id="<%= @id %>" class="hero"><%= @content %></div>
-          "\""
+          ~L\"""
+          <div id="user-<%= @id %>" class="user"><%= @user.name %></div>
+          \"""
         end
       end
 
@@ -79,21 +81,43 @@ defmodule Phoenix.LiveComponent do
   component is first rendered. Then for each rendering, the optional
   `c:preload/1` and `c:update/2` callbacks are called before `c:render/1`.
 
+  ## Targeting Component Events
+
   Stateful components can also implement the `c:handle_event/3` callback
   that works exactly the same as in LiveView. For a client event to
-  reach a component, the tag must be annotated with a `phx-target`
-  annotation which must be set to the `@cid` assign. The `@cid` assign
-  is a random, unique value, used by LiveView to associate the component
-  instance on the client with its instance on server. To use it, one can
-  do:
+  reach a component, the tag must be annotated with a `phx-target`.
+  If you want to send the event to yourself, you can simply use the
+  `@myself` assign, which is an *internal unique reference* to the
+  component instance:
 
-      <a href="#" phx-click="say_hello" phx-target="<%= @cid %>">
+      <a href="#" phx-click="say_hello" phx-target="<%= @myself %>">
         Say hello!
       </a>
 
-  Then `c:handle_event/3` will be called by with the "say_hello" event.
-  When `c:handle_event/3` is called for a component, only the diff of
-  the component is sent to the client, making them extremely efficient.
+  Note `@myself` is not set for stateless components, as they cannot
+  receive events.
+
+  If you want to target another component, you can also pass an ID
+  or a class selector to any element inside the targeted component.
+  For example, if there is a `UserComponent` with the DOM ID of `user-13`,
+  using a query selector, we can send an event to it with:
+
+      <a href="#" phx-click="say_hello" phx-target="#user-13">
+        Say hello!
+      </a>
+
+  In both cases, `c:handle_event/3` will be called with the
+  "say_hello" event. When `c:handle_event/3` is called for a component,
+  only the diff of the component is sent to the client, making them
+  extremely efficient.
+
+  Any valid query selector for `phx-target` is supported, provided that the
+  matched nodes are children of a LiveView or LiveComponent, for example
+  to send the `close` event to multiple components:
+
+      <a href="#" phx-click="close" phx-target="#modal, #sidebar">
+        Dismiss
+      </a>
 
   ### Preloading and update
 
@@ -150,20 +174,19 @@ defmodule Phoenix.LiveComponent do
   should assume only one of them to be the source of truth. Let's discuss
   these approaches in detail.
 
-  Imagine that the scenario we will explore is that we have a LiveView
-  representing a board, where each card in the board is a separate component.
-  Each card has a form that allows to update the form title directly in the
-  component. We will see how to organize the data flow keeping either the
-  view or the component as the source of truth.
+  Imagine a scenario where LiveView represents a board with each card in
+  it as a separate component. Each card has a form that allows to update
+  its title directly in the component. We will see how to organize the
+  data flow keeping either the view or the component as the source of truth.
 
   ### LiveView as the source of truth
 
   If the LiveView is the source of truth, the LiveView will be responsible
-  for fetching all of the cards in a board. Then it will call `live_component/2`
+  for fetching all of the cards in a board. Then it will call `live_component/3`
   for each card, passing the card struct as argument to CardComponent:
 
       <%= for card <- @cards do %>
-        <%= live_component CardComponent, card: card, board_id: @id %>
+        <%= live_component @socket, CardComponent, card: card, id: card.id, board_id: @id %>
       <% end %>
 
   Now, when the user submits a form inside the CardComponent to update the
@@ -230,7 +253,7 @@ defmodule Phoenix.LiveComponent do
   only by passing the IDs:
 
       <%= for card_id <- @card_ids do %>
-        <%= live_component CardComponent, card_id: card_id, board_id: @id %>
+        <%= live_component @socket, CardComponent, id: card_id, board_id: @id %>
       <% end %>
 
   Now, each CardComponent loads their own card. Of course, doing so per
@@ -275,7 +298,7 @@ defmodule Phoenix.LiveComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~L"\""
+          ~L\"""
           <div class="grid">
             <%= for entry <- @entries do %>
               <div class="column">
@@ -283,11 +306,19 @@ defmodule Phoenix.LiveComponent do
               </div>
             <% end %>
           </div>
-          "\""
+          \"""
         end
       end
 
   Where the `:entry` assign was injected into the `do/end` block.
+
+  Note the `@inner_content` assign is also passed to `c:update/2`
+  along all other assigns. So if you have a custom `update/2`
+  implementation, make sure to assign it to the socket like so:
+
+      def update(%{inner_content: inner_content}, socket) do
+        {:ok, assign(socket, inner_content: inner_content)}
+      end
 
   The approach above is the preferred one when passing blocks to `do/end`.
   However, if you are outside of a .leex template and you want to invoke a
@@ -298,13 +329,11 @@ defmodule Phoenix.LiveComponent do
         new_assigns -> "New entry: " <> new_assigns[:entry]
       end
 
-  ## Live links and live redirects
+  ## Live patches and live redirects
 
-  A template rendered inside a component can use `live_link` calls. The
-  `live_link` is always handled by the parent `LiveView`, as components
-  do not provide `handle_params`. `live_redirect` from inside a component
-  is not currently supported. For such, you must send a message to the
-  LiveView itself, as mentioned above, which may then redirect.
+  A template rendered inside a component can use `live_patch` and
+  `live_redirect` calls. The `live_patch` is always handled by the parent
+  `LiveView`, as components do not provide `handle_params`.
 
   ## Limitations
 
@@ -342,9 +371,15 @@ defmodule Phoenix.LiveComponent do
   In this case, the solution is to not use `content_tag` and rely on LiveEEx
   to build the markup.
   """
+
+  alias Phoenix.LiveView.Socket
+
   defmacro __using__(_) do
     quote do
       import Phoenix.LiveView
+      import Phoenix.LiveView.Helpers
+      @behaviour Phoenix.LiveComponent
+      @before_compile Phoenix.LiveView.Renderer
 
       @doc false
       def __live__, do: %{kind: :component, module: __MODULE__}
@@ -354,19 +389,20 @@ defmodule Phoenix.LiveComponent do
   @callback mount(socket :: Socket.t()) ::
               {:ok, Socket.t()} | {:ok, Socket.t(), keyword()}
 
-  @callback preload([Socket.assigns()]) :: [Socket.assigns()]
+  @callback preload(list_of_assigns :: [Socket.assigns()]) ::
+              list_of_assigns :: [Socket.assigns()]
 
-  @callback update(Socket.assigns(), socket :: Socket.t()) ::
+  @callback update(assigns :: Socket.assigns(), socket :: Socket.t()) ::
               {:ok, Socket.t()}
 
   @callback render(assigns :: Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
 
   @callback handle_event(
               event :: binary,
-              Phoenix.LiveView.unsigned_params(),
+              unsigned_params :: Socket.unsigned_params(),
               socket :: Socket.t()
             ) ::
               {:noreply, Socket.t()}
 
-  @optional_callbacks mount: 1, update: 2, handle_event: 3
+  @optional_callbacks mount: 1, preload: 1, update: 2, handle_event: 3
 end

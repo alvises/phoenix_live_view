@@ -5,7 +5,9 @@ defmodule Phoenix.LiveView.Static do
   alias Phoenix.LiveView.{Socket, Utils, Diff}
 
   # Token version. Should be changed whenever new data is stored.
-  @token_vsn 2
+  @token_vsn 4
+
+  def token_vsn, do: @token_vsn
 
   # Max session age in seconds. Equivalent to 2 weeks.
   @max_session_age 1_209_600
@@ -37,14 +39,21 @@ defmodule Phoenix.LiveView.Static do
       {:error, :expired}
   """
   def verify_session(endpoint, session_token, static_token) do
-    with {:ok, session} <- verify_token(endpoint, session_token),
-         {:ok, static} <- verify_static_token(endpoint, static_token) do
+    with {:ok, %{id: id} = session} <- verify_token(endpoint, session_token),
+         {:ok, static} <- verify_static_token(endpoint, id, static_token) do
       {:ok, Map.merge(session, static)}
     end
   end
 
-  defp verify_static_token(_endpoint, nil), do: {:ok, %{assigned_new: []}}
-  defp verify_static_token(endpoint, token), do: verify_token(endpoint, token)
+  defp verify_static_token(_endpoint, _id, nil), do: {:ok, %{assign_new: []}}
+
+  defp verify_static_token(endpoint, id, token) do
+    case verify_token(endpoint, token) do
+      {:ok, %{id: ^id}} = ok -> ok
+      {:ok, _} -> {:error, :invalid}
+      {:error, _} = error -> error
+    end
+  end
 
   defp verify_token(endpoint, token) do
     case Phoenix.Token.verify(endpoint, Utils.salt!(endpoint), token, max_age: @max_session_age) do
@@ -54,10 +63,19 @@ defmodule Phoenix.LiveView.Static do
     end
   end
 
-  # TODO: Warn if opts :session has atom keys
   defp load_session(conn_or_socket_session, opts) do
     user_session = Keyword.get(opts, :session, %{})
+    validate_session(user_session)
     {user_session, Map.merge(conn_or_socket_session, user_session)}
+  end
+
+  defp validate_session(session) do
+    if is_map(session) and Enum.all?(session, fn {k, _} -> is_binary(k) end) do
+      :ok
+    else
+      raise ArgumentError,
+            "LiveView :session must be a map with string keys, got: #{inspect(session)}"
+    end
   end
 
   defp maybe_get_session(conn) do
@@ -75,6 +93,7 @@ defmodule Phoenix.LiveView.Static do
   ## Options
 
     * `:router` - the router the live view was built at
+    * `:action` - the router action
     * `:session` - the required map of session data
     * `:container` - the optional tuple for the HTML tag and DOM attributes to
       be used for the LiveView container. For example: `{:li, style: "color: blue;"}`
@@ -85,20 +104,30 @@ defmodule Phoenix.LiveView.Static do
     config = load_live!(view, :view)
     {tag, extended_attrs} = container(config, opts)
     router = Keyword.get(opts, :router)
+    action = Keyword.get(opts, :action)
     endpoint = Phoenix.Controller.endpoint_module(conn)
+    flash = Map.get(conn.private, :phoenix_flash, %{})
     request_url = Plug.Conn.request_url(conn)
 
     socket =
       Utils.configure_socket(
-        %Socket{endpoint: endpoint, view: view},
-        %{assigned_new: {conn.assigns, []}, connect_params: %{}, conn_session: conn_session}
+        %Socket{endpoint: endpoint, view: view, root_view: view, router: router},
+        %{
+          assign_new: {conn.assigns, []},
+          connect_params: %{},
+          connect_info: %{},
+          conn_session: conn_session
+        },
+        action,
+        flash
       )
 
-    case call_mount_and_handle_params!(socket, router, view, mount_session, conn.params, request_url) do
+    case call_mount_and_handle_params!(socket, view, mount_session, conn.params, request_url) do
       {:ok, socket} ->
         data_attrs = [
           phx_view: config.name,
-          phx_session: sign_root_session(socket, router, view, to_sign_session)
+          phx_session: sign_root_session(socket, router, view, to_sign_session),
+          phx_static: sign_static_token(socket)
         ]
 
         data_attrs = if(router, do: [phx_main: true], else: []) ++ data_attrs
@@ -109,7 +138,12 @@ defmodule Phoenix.LiveView.Static do
           | extended_attrs
         ]
 
-        {:ok, to_rendered_content_tag(socket, tag, view, attrs)}
+        try do
+          {:ok, to_rendered_content_tag(socket, tag, view, attrs), socket.assigns}
+        catch
+          :throw, {:phoenix, :child_redirect, redirected, flash} ->
+            {:stop, Utils.replace_flash(%{socket | redirected: redirected}, flash)}
+        end
 
       {:stop, socket} ->
         {:stop, socket}
@@ -119,7 +153,7 @@ defmodule Phoenix.LiveView.Static do
   @doc """
   Renders only the static container of the LiveView.
 
-  Accepts same options as `static_render/3`.
+  Accepts same options as `render/3`.
 
   This is called by external live links.
   """
@@ -128,12 +162,16 @@ defmodule Phoenix.LiveView.Static do
     config = load_live!(view, :view)
     {tag, extended_attrs} = container(config, opts)
     router = Keyword.get(opts, :router)
+    action = Keyword.get(opts, :action)
     endpoint = Phoenix.Controller.endpoint_module(conn)
+    flash = Map.get(conn.private, :phoenix_flash, %{})
 
     socket =
       Utils.configure_socket(
-        %Socket{endpoint: endpoint, view: view},
-        %{assigned_new: {conn.assigns, []}, connect_params: %{}}
+        %Socket{endpoint: endpoint, view: view, root_view: view},
+        %{assign_new: {conn.assigns, []}, connect_params: %{}, connect_info: %{}},
+        action,
+        flash
       )
 
     session_token = sign_root_session(socket, router, view, to_sign_session)
@@ -155,7 +193,7 @@ defmodule Phoenix.LiveView.Static do
     * `parent` - the parent `%Phoenix.LiveView.Socket{}`
     * `view` - the child LiveView module
 
-  Accepts the same options as `static_render/3`.
+  Accepts the same options as `render/3`.
   """
   def nested_render(%Socket{endpoint: endpoint, connected?: connected?} = parent, view, opts) do
     config = load_live!(view, :view)
@@ -171,11 +209,16 @@ defmodule Phoenix.LiveView.Static do
       Utils.configure_socket(
         %Socket{
           id: to_string(child_id),
+          root_view: parent.root_view,
+          view: view,
           endpoint: endpoint,
           root_pid: parent.root_pid,
-          parent_pid: self()
+          parent_pid: self(),
+          router: parent.router
         },
-        %{assigned_new: {parent.assigns, []}}
+        %{assign_new: {parent.assigns, []}, phoenix_live_layout: false},
+        nil,
+        %{}
       )
 
     if connected? do
@@ -191,7 +234,13 @@ defmodule Phoenix.LiveView.Static do
     {tag, extended_attrs} = container
 
     socket = put_in(socket.private[:conn_session], conn_session)
-    socket = Utils.maybe_call_mount!(socket, view, [mount_session, socket])
+
+    socket =
+      Utils.maybe_call_mount!(socket, view, [:not_mounted_at_router, mount_session, socket])
+
+    if redir = socket.redirected do
+      throw({:phoenix, :child_redirect, redir, Utils.get_flash(socket)})
+    end
 
     if exports_handle_params?(view) do
       raise ArgumentError, "handle_params/3 is not allowed on child LiveViews, only at the root"
@@ -241,35 +290,42 @@ defmodule Phoenix.LiveView.Static do
     end
   end
 
-  defp call_mount_and_handle_params!(socket, router, view, session, params, uri) do
+  defp call_mount_and_handle_params!(socket, view, session, params, uri) do
+    mount_params = if socket.router, do: params, else: :not_mounted_at_router
+
     socket
-    |> Utils.maybe_call_mount!(view, [session, socket])
-    |> mount_handle_params(router, view, params, uri)
+    |> Utils.maybe_call_mount!(view, [mount_params, session, socket])
+    |> mount_handle_params(view, params, uri)
     |> case do
+      {:noreply, %Socket{redirected: {:live, _, _}} = socket} ->
+        {:stop, socket}
+
+      {:noreply, %Socket{redirected: {:redirect, _opts}} = new_socket} ->
+        {:stop, new_socket}
+
       {:noreply, %Socket{redirected: nil} = new_socket} ->
         {:ok, new_socket}
 
-      {:noreply, %Socket{} = new_socket} ->
-        {:stop, new_socket}
+      other ->
+        raise ArgumentError, """
+        invalid result returned from #{inspect(view)}.handle_params/3.
 
-      {:stop, %Socket{redirected: nil}} ->
-        Utils.raise_bad_stop_and_no_redirect!()
-
-      {:stop, %Socket{redirected: {:live, _}}} ->
-        Utils.raise_bad_stop_and_live_redirect!()
-
-      {:stop, %Socket{} = new_socket} ->
-        {:stop, new_socket}
+        Expected {:noreply, socket}, got: #{inspect(other)}
+        """
     end
   end
 
-  defp mount_handle_params(socket, router, view, params, uri) do
+  defp mount_handle_params(%Socket{redirected: mount_redir} = socket, view, params, uri) do
     cond do
+      mount_redir ->
+        {:noreply, socket}
+
       not exports_handle_params?(view) ->
         {:noreply, socket}
 
-      router == nil ->
-        Utils.live_link_info!(router, view, uri)
+      is_nil(socket.router) ->
+        # Let the callback fail for the usual reasons
+        Utils.live_link_info!(socket, view, uri)
 
       true ->
         view.handle_params(params, uri, socket)
@@ -283,6 +339,7 @@ defmodule Phoenix.LiveView.Static do
     sign_token(endpoint, %{
       id: id,
       view: view,
+      root_view: view,
       router: router,
       parent_pid: nil,
       root_pid: nil,
@@ -295,6 +352,8 @@ defmodule Phoenix.LiveView.Static do
     sign_token(parent.endpoint, %{
       id: child.id,
       view: view,
+      root_view: parent.root_view,
+      router: parent.router,
       parent_pid: self(),
       root_pid: parent.root_pid,
       session: session
@@ -308,7 +367,8 @@ defmodule Phoenix.LiveView.Static do
     # IMPORTANT: If you change the third argument, @token_vsn has to be bumped.
     sign_token(endpoint, %{
       id: id,
-      assigned_new: assigned_new_keys(socket)
+      flash: socket.assigns.flash,
+      assign_new: assign_new_keys(socket)
     })
   end
 
@@ -323,8 +383,8 @@ defmodule Phoenix.LiveView.Static do
     end
   end
 
-  defp assigned_new_keys(socket) do
-    {_, keys} = socket.private.assigned_new
+  defp assign_new_keys(socket) do
+    {_, keys} = socket.private.assign_new
     keys
   end
 end
