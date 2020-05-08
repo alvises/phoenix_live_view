@@ -615,9 +615,17 @@ function liveViewSvgWithImageDOM() {
   const div = document.createElement("div")
   div.setAttribute("data-phx-view", "User.Svg")
   div.setAttribute("data-phx-session", "svg123")
-  div.setAttribute("id", "menu")
+  div.setAttribute("id", "svgimgview")
   div.setAttribute("class", "user-implemented-class")
-  div.innerHTML = `<svg><image href="https://elixir-lang.org/images/logo/logo.png"></image></svg>`
+  div.innerHTML = `
+  <main>
+    <svg version="1.1">
+      <svg version="1.1">
+        <image href="logo.png"></image>
+      </svg>
+    </svg>
+  </main>
+  `;
 
   document.body.appendChild(div)
   return div
@@ -626,35 +634,44 @@ function liveViewSvgWithImageDOM() {
 
 describe("SVG", () => {
   
-  test("svg image is rendered correctly after join", () => {
+  test("svg image is rendered correctly after join when inside an svg", () => {
     let liveSocket = new LiveSocket("/live", Socket)
     let el = liveViewSvgWithImageDOM()
     let view = new View(el, liveSocket)
 
     stubChannel(view)
 
+
     let joinDiff = {
-      "0": {
+      "0": "",
+        "1": "",
+          "2": {
         "0": 0,
-        "s": [
-          "<svg>",
-          "</svg>"
-        ]
+          "s": [
+            "<svg version=\"1.1\">",
+            "</svg>"
+          ]
       },
       "c": {
         "0": {
-          "0": "https://elixir-lang.org/images/logo/logo.png",
+          "0": "updated-logo.png",
           "s": [
-            "<image href=\"",
-            "\"></image>\n"
+            "<svg version=\"1.1\"><image href=\"",
+            "\"></image></svg>"
           ]
         }
       },
-      "s": ["", ""]
+      "s": [
+        "<main>",
+        "",
+        "",
+        "</main>"
+      ]
     };
 
     view.onJoin({ rendered: joinDiff });
-    expect(view.el.innerHTML.trim()).toBe(`<svg><image href=\"https://elixir-lang.org/images/logo/logo.png\" data-phx-component=\"0\" id=\"container-0-0\"></image></svg>`)
+    expect(view.el.innerHTML.trim())
+    .toBe(`<main><svg version="1.1"><svg version="1.1" data-phx-component="0" id="svgimgview-0-0"><image href="updated-logo.png"></image></svg></svg></main>`);
   })
 
 })
